@@ -2,9 +2,14 @@
  * Riksan AI — /api/chat
  * Vercel Serverless Function (Node.js runtime).
  *
- * This is the ONLY place the Claude API key is ever read. It comes from
- * the ANTHROPIC_API_KEY environment variable set in the Vercel project
- * settings — it is never sent to, or stored in, the browser.
+ * This proxies chat requests to AgentRouter's Anthropic-compatible endpoint
+ * (https://agentrouter.org/v1/messages) instead of api.anthropic.com directly.
+ * AgentRouter is a third-party service, not an official Anthropic product —
+ * traffic passes through their servers first.
+ *
+ * The token is read ONLY here, from the ANTHROPIC_AUTH_TOKEN environment
+ * variable set in the Vercel project settings — it is never sent to, or
+ * stored in, the browser.
  *
  * GET  /api/chat  -> lightweight health check the frontend uses to show
  *                    the "Terhubung" / "Kunci API belum diatur" status pill.
@@ -12,7 +17,8 @@
  */
 
 const ANTHROPIC_VERSION = "2023-06-01";
-const DEFAULT_MODEL = "claude-sonnet-5";
+const AGENTROUTER_URL = "https://agentrouter.org/v1/messages";
+const DEFAULT_MODEL = "claude-opus-4-6";
 const MAX_TOKENS = 1024;
 
 const SYSTEM_PROMPT = `Anda adalah Riksan AI, asisten percakapan yang ramah, jelas, dan efisien.
@@ -21,8 +27,8 @@ Berikan jawaban yang ringkas namun lengkap, gunakan poin-poin bila membantu, dan
 
 module.exports = async function handler(req, res) {
   if (req.method === "GET") {
-    return res.status(process.env.ANTHROPIC_API_KEY ? 200 : 503).json({
-      ok: Boolean(process.env.ANTHROPIC_API_KEY),
+    return res.status(process.env.ANTHROPIC_AUTH_TOKEN ? 200 : 503).json({
+      ok: Boolean(process.env.ANTHROPIC_AUTH_TOKEN),
     });
   }
 
@@ -31,10 +37,10 @@ module.exports = async function handler(req, res) {
     return res.status(405).json({ error: "Metode tidak diizinkan." });
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
+  const authToken = process.env.ANTHROPIC_AUTH_TOKEN;
+  if (!authToken) {
     return res.status(503).json({
-      error: "Server belum dikonfigurasi. Atur ANTHROPIC_API_KEY di pengaturan Vercel.",
+      error: "Server belum dikonfigurasi. Atur ANTHROPIC_AUTH_TOKEN di pengaturan Vercel.",
     });
   }
 
@@ -57,11 +63,11 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    const upstream = await fetch("https://api.anthropic.com/v1/messages", {
+    const upstream = await fetch(AGENTROUTER_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": apiKey,
+        "Authorization": `Bearer ${authToken}`,
         "anthropic-version": ANTHROPIC_VERSION,
       },
       body: JSON.stringify({
