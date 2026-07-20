@@ -1,0 +1,9 @@
+{
+  "name": "riksan-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Riksan AI — asisten chatbot modern bertenaga Claude, frontend statis + Vercel Serverless Function.",
+  "engines": {
+    "node": ">=18"
+  }
+}
