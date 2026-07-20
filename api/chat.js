@@ -2,22 +2,14 @@
  * Riksan AI — /api/chat
  * Vercel Serverless Function (Node.js runtime).
  *
- * This proxies chat requests to AgentRouter's Anthropic-compatible endpoint
- * (https://agentrouter.org/v1/messages) instead of api.anthropic.com directly.
- * AgentRouter is a third-party service, not an official Anthropic product —
- * traffic passes through their servers first.
- *
- * The token is read ONLY here, from the ANTHROPIC_AUTH_TOKEN environment
- * variable set in the Vercel project settings — it is never sent to, or
- * stored in, the browser.
- *
- * GET  /api/chat  -> lightweight health check the frontend uses to show
- *                    the "Terhubung" / "Kunci API belum diatur" status pill.
- * POST /api/chat  -> { messages: [{ role, content }, ...] } -> { reply }
+ * Proxy chat request ke AgentRouter Anthropic-compatible endpoint.
+ * Mengikuti dokumentasi AgentRouter: Endpoint menggunakan /messages (tanpa /v1).
  */
 
 const ANTHROPIC_VERSION = "2023-06-01";
-const AGENTROUTER_URL = "https://agentrouter.org/v1/messages";
+// ❌ URL lama: "https://agentrouter.org/v1/messages"
+// ✅ URL sesuai dokumentasi resmi AgentRouter Anthropic-compatible:
+const AGENTROUTER_URL = "https://agentrouter.org/messages"; 
 const DEFAULT_MODEL = "claude-opus-4-6";
 const MAX_TOKENS = 1024;
 
@@ -56,14 +48,13 @@ module.exports = async function handler(req, res) {
       role: m.role === "assistant" ? "assistant" : "user",
       content: m.content.slice(0, 8000),
     }))
-    .slice(-30); // keep payloads bounded
+    .slice(-30);
 
   if (cleanMessages.length === 0) {
     return res.status(400).json({ error: "Tidak ada pesan yang valid untuk dikirim." });
   }
 
   try {
-    // Tambahkan timeout 25 detik agar tidak melampaui limit Vercel (10-30s)
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 25000);
 
@@ -85,36 +76,30 @@ module.exports = async function handler(req, res) {
 
     clearTimeout(timeoutId);
 
-    // Ambil respons mentah sebagai teks terlebih dahulu untuk keamanan
+    // Ambil respons sebagai teks terlebih dahulu untuk menghindari crash SyntaxError JSON
     const rawText = await upstream.text();
 
-    // 1. Tangani jika status HTTP upstream BUKAN 2xx (misal: 401, 404, 500, 502, 503)
     if (!upstream.ok) {
-      console.error(`AgentRouter Upstream Error [${upstream.status}]:`, rawText);
+      console.error(`AgentRouter Error [${upstream.status}]:`, rawText);
 
       let errorMessage = `Upstream error (${upstream.status})`;
-
-      // Cek apakah balasan berupa JSON atau HTML error dari Cloudflare/Vercel
       if (rawText.startsWith("{") || rawText.startsWith("[")) {
         try {
           const parsedError = JSON.parse(rawText);
           errorMessage = parsedError?.error?.message || parsedError?.message || errorMessage;
-        } catch (_) {
-          /* Abaikan jika gagal parse */
-        }
+        } catch (_) {}
       } else if (rawText.includes("<!DOCTYPE") || rawText.includes("<html")) {
-        errorMessage = "Layanan AgentRouter sedang bermasalah atau mengembalikan halaman error (HTML).";
+        errorMessage = "AgentRouter mengembalikan halaman error (HTML). Periksa API Key atau Endpoint.";
       }
 
       return res.status(upstream.status).json({ error: errorMessage });
     }
 
-    // 2. Parse JSON hanya jika HTTP status OK (200)
     let data;
     try {
       data = JSON.parse(rawText);
     } catch (parseErr) {
-      console.error("Gagal melakukan parse JSON dari respons AgentRouter:", rawText);
+      console.error("Gagal parse JSON:", rawText);
       return res.status(502).json({ error: "Respons dari layanan AI tidak valid." });
     }
 
