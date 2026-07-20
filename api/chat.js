@@ -2,12 +2,11 @@
  * Riksan AI — /api/chat
  * Vercel Serverless Function (Node.js runtime).
  *
- * Proxy chat request ke AgentRouter Anthropic-compatible endpoint.
- * Endpoint: https://agentrouter.org/messages (tanpa /v1).
+ * Menggunakan Jalur OpenAI-Compatible AgentRouter untuk bypass Aliyun WAF Captcha.
+ * Endpoint: https://agentrouter.org/v1/chat/completions
  */
 
-const ANTHROPIC_VERSION = "2023-06-01";
-const AGENTROUTER_URL = "https://agentrouter.org/messages";
+const AGENTROUTER_URL = "https://agentrouter.org/v1/chat/completions";
 const DEFAULT_MODEL = "claude-opus-4-6";
 const MAX_TOKENS = 1024;
 
@@ -40,15 +39,19 @@ module.exports = async function handler(req, res) {
     return res.status(400).json({ error: "Field 'messages' wajib diisi dan tidak boleh kosong." });
   }
 
-  const cleanMessages = messages
-    .filter((m) => m && typeof m.content === "string" && m.content.trim().length > 0)
-    .map((m) => ({
-      role: m.role === "assistant" ? "assistant" : "user",
-      content: m.content.slice(0, 8000),
-    }))
-    .slice(-30);
+  // Format pesan disesuaikan dengan struktur OpenAI Chat Completion
+  const formattedMessages = [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...messages
+      .filter((m) => m && typeof m.content === "string" && m.content.trim().length > 0)
+      .map((m) => ({
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: m.content.slice(0, 8000),
+      }))
+      .slice(-30),
+  ];
 
-  if (cleanMessages.length === 0) {
+  if (formattedMessages.length <= 1) {
     return res.status(400).json({ error: "Tidak ada pesan yang valid untuk dikirim." });
   }
 
@@ -60,17 +63,15 @@ module.exports = async function handler(req, res) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Accept": "application/json",
         "Authorization": `Bearer ${authToken}`,
-        "anthropic-version": ANTHROPIC_VERSION,
-        // User-Agent ini penting untuk melewati Aliyun WAF Captcha Firewall
-        "User-Agent": "claude-code/0.2.29 (Node/v20.10.0; darwin-x64)",
+        // Menyamar sebagai User-Agent browser modern standar untuk menembus WAF
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json",
       },
       body: JSON.stringify({
         model: process.env.ANTHROPIC_MODEL || DEFAULT_MODEL,
         max_tokens: MAX_TOKENS,
-        system: SYSTEM_PROMPT,
-        messages: cleanMessages,
+        messages: formattedMessages,
         stream: false,
       }),
       signal: controller.signal,
@@ -80,54 +81,34 @@ module.exports = async function handler(req, res) {
 
     const rawText = await upstream.text();
 
-    // 1. Cek apakah terkena blokir Aliyun WAF Captcha
+    // 1. Cek jika masih kena blokir Aliyun WAF Captcha
     if (rawText.includes("aliyun_waf") || rawText.includes("AliyunCaptcha")) {
-      console.error("AgentRouter WAF Error: Terdeteksi Aliyun Captcha firewall.");
+      console.error("AgentRouter WAF Error: Terdeteksi Aliyun Captcha.");
       return res.status(503).json({
-        error: "Akses diblokir oleh firewall AgentRouter (Aliyun Captcha). Coba beberapa saat lagi.",
+        error: "Server AI sedang sibuk/dibatasi oleh WAF. Silakan coba beberapa saat lagi.",
       });
     }
 
-    // 2. Cek HTTP Status Non-OK
+    // 2. Cek HTTP status error
     if (!upstream.ok) {
       console.error(`AgentRouter Error [${upstream.status}]:`, rawText.slice(0, 300));
       let errorMessage = `Upstream error (${upstream.status})`;
 
-      if (rawText.startsWith("{") || rawText.startsWith("[")) {
-        try {
-          const parsed = JSON.parse(rawText);
-          errorMessage = parsed?.error?.message || parsed?.message || errorMessage;
-        } catch (_) {}
-      }
+      try {
+        const parsed = JSON.parse(rawText);
+        errorMessage = parsed?.error?.message || parsed?.message || errorMessage;
+      } catch (_) {}
 
       return res.status(upstream.status).json({ error: errorMessage });
     }
 
-    // 3. Parsing Balasan JSON
+    // 3. Extract balasan format OpenAI (data.choices[0].message.content)
     let reply = "";
     try {
       const data = JSON.parse(rawText);
-
-      // Standard Anthropic Response
-      if (Array.isArray(data.content)) {
-        reply = data.content
-          .filter((block) => block.type === "text")
-          .map((block) => block.text)
-          .join("\n")
-          .trim();
-      } 
-      // Standard OpenAI Response
-      else if (data.choices && data.choices[0]?.message?.content) {
-        reply = data.choices[0].message.content.trim();
-      } 
-      // Fallback Field
-      else if (typeof data.reply === "string") {
-        reply = data.reply;
-      } else if (typeof data.message === "string") {
-        reply = data.message;
-      }
+      reply = data.choices?.[0]?.message?.content?.trim() || "";
     } catch (parseErr) {
-      console.warn("Gagal parse JSON, mencoba baca mentah:", rawText.slice(0, 200));
+      console.warn("Gagal parse JSON OpenAI:", rawText.slice(0, 200));
       reply = rawText.trim();
     }
 
