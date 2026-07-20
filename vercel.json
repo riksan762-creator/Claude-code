@@ -1,18 +1,16 @@
 {
   "version": 2,
-  "functions": {
-    "api/chat.js": {
-      "runtime": "@vercel/node"
-    }
-  },
   "routes": [
     {
-      "src": "/api/chat",
-      "dest": "/api/chat.js"
+      "src": "/api/(.*)",
+      "dest": "/api/$1"
+    },
+    {
+      "handle": "filesystem"
     },
     {
       "src": "/(.*)",
-      "dest": "/$1"
+      "dest": "/index.html"
     }
   ]
 }
