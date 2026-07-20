@@ -1,9 +1,14 @@
 {
-  "name": "riksan-ai",
+  "name": "agentrouter-chatbot",
   "version": "1.0.0",
   "private": true,
-  "description": "Riksan AI — asisten chatbot modern bertenaga Claude, frontend statis + Vercel Serverless Function.",
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "start": "vercel dev"
+  },
   "engines": {
     "node": ">=18"
-  }
+  },
+  "dependencies": {}
 }
