@@ -3,13 +3,11 @@
  * Vercel Serverless Function (Node.js runtime).
  *
  * Proxy chat request ke AgentRouter Anthropic-compatible endpoint.
- * Mengikuti dokumentasi AgentRouter: Endpoint menggunakan /messages (tanpa /v1).
+ * Endpoint: https://agentrouter.org/messages (tanpa /v1).
  */
 
 const ANTHROPIC_VERSION = "2023-06-01";
-// ❌ URL lama: "https://agentrouter.org/v1/messages"
-// ✅ URL sesuai dokumentasi resmi AgentRouter Anthropic-compatible:
-const AGENTROUTER_URL = "https://agentrouter.org/messages"; 
+const AGENTROUTER_URL = "https://agentrouter.org/messages";
 const DEFAULT_MODEL = "claude-opus-4-6";
 const MAX_TOKENS = 1024;
 
@@ -62,54 +60,81 @@ module.exports = async function handler(req, res) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "Accept": "application/json",
         "Authorization": `Bearer ${authToken}`,
         "anthropic-version": ANTHROPIC_VERSION,
+        // User-Agent ini penting untuk melewati Aliyun WAF Captcha Firewall
+        "User-Agent": "claude-code/0.2.29 (Node/v20.10.0; darwin-x64)",
       },
       body: JSON.stringify({
         model: process.env.ANTHROPIC_MODEL || DEFAULT_MODEL,
         max_tokens: MAX_TOKENS,
         system: SYSTEM_PROMPT,
         messages: cleanMessages,
+        stream: false,
       }),
       signal: controller.signal,
     });
 
     clearTimeout(timeoutId);
 
-    // Ambil respons sebagai teks terlebih dahulu untuk menghindari crash SyntaxError JSON
     const rawText = await upstream.text();
 
-    if (!upstream.ok) {
-      console.error(`AgentRouter Error [${upstream.status}]:`, rawText);
+    // 1. Cek apakah terkena blokir Aliyun WAF Captcha
+    if (rawText.includes("aliyun_waf") || rawText.includes("AliyunCaptcha")) {
+      console.error("AgentRouter WAF Error: Terdeteksi Aliyun Captcha firewall.");
+      return res.status(503).json({
+        error: "Akses diblokir oleh firewall AgentRouter (Aliyun Captcha). Coba beberapa saat lagi.",
+      });
+    }
 
+    // 2. Cek HTTP Status Non-OK
+    if (!upstream.ok) {
+      console.error(`AgentRouter Error [${upstream.status}]:`, rawText.slice(0, 300));
       let errorMessage = `Upstream error (${upstream.status})`;
+
       if (rawText.startsWith("{") || rawText.startsWith("[")) {
         try {
-          const parsedError = JSON.parse(rawText);
-          errorMessage = parsedError?.error?.message || parsedError?.message || errorMessage;
+          const parsed = JSON.parse(rawText);
+          errorMessage = parsed?.error?.message || parsed?.message || errorMessage;
         } catch (_) {}
-      } else if (rawText.includes("<!DOCTYPE") || rawText.includes("<html")) {
-        errorMessage = "AgentRouter mengembalikan halaman error (HTML). Periksa API Key atau Endpoint.";
       }
 
       return res.status(upstream.status).json({ error: errorMessage });
     }
 
-    let data;
+    // 3. Parsing Balasan JSON
+    let reply = "";
     try {
-      data = JSON.parse(rawText);
+      const data = JSON.parse(rawText);
+
+      // Standard Anthropic Response
+      if (Array.isArray(data.content)) {
+        reply = data.content
+          .filter((block) => block.type === "text")
+          .map((block) => block.text)
+          .join("\n")
+          .trim();
+      } 
+      // Standard OpenAI Response
+      else if (data.choices && data.choices[0]?.message?.content) {
+        reply = data.choices[0].message.content.trim();
+      } 
+      // Fallback Field
+      else if (typeof data.reply === "string") {
+        reply = data.reply;
+      } else if (typeof data.message === "string") {
+        reply = data.message;
+      }
     } catch (parseErr) {
-      console.error("Gagal parse JSON:", rawText);
-      return res.status(502).json({ error: "Respons dari layanan AI tidak valid." });
+      console.warn("Gagal parse JSON, mencoba baca mentah:", rawText.slice(0, 200));
+      reply = rawText.trim();
     }
 
-    const reply = (data.content || [])
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join("\n")
-      .trim();
+    return res.status(200).json({
+      reply: reply || "Maaf, tidak ada balasan dari model AI.",
+    });
 
-    return res.status(200).json({ reply: reply || "Maaf, saya tidak dapat memberikan jawaban saat ini." });
   } catch (err) {
     console.error("Riksan AI upstream error:", err);
 
