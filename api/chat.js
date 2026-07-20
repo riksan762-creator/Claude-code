@@ -63,6 +63,10 @@ module.exports = async function handler(req, res) {
   }
 
   try {
+    // Tambahkan timeout 25 detik agar tidak melampaui limit Vercel (10-30s)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
+
     const upstream = await fetch(AGENTROUTER_URL, {
       method: "POST",
       headers: {
@@ -76,13 +80,42 @@ module.exports = async function handler(req, res) {
         system: SYSTEM_PROMPT,
         messages: cleanMessages,
       }),
+      signal: controller.signal,
     });
 
-    const data = await upstream.json();
+    clearTimeout(timeoutId);
 
+    // Ambil respons mentah sebagai teks terlebih dahulu untuk keamanan
+    const rawText = await upstream.text();
+
+    // 1. Tangani jika status HTTP upstream BUKAN 2xx (misal: 401, 404, 500, 502, 503)
     if (!upstream.ok) {
-      const message = data?.error?.message || "Terjadi kesalahan pada layanan AI.";
-      return res.status(upstream.status).json({ error: message });
+      console.error(`AgentRouter Upstream Error [${upstream.status}]:`, rawText);
+
+      let errorMessage = `Upstream error (${upstream.status})`;
+
+      // Cek apakah balasan berupa JSON atau HTML error dari Cloudflare/Vercel
+      if (rawText.startsWith("{") || rawText.startsWith("[")) {
+        try {
+          const parsedError = JSON.parse(rawText);
+          errorMessage = parsedError?.error?.message || parsedError?.message || errorMessage;
+        } catch (_) {
+          /* Abaikan jika gagal parse */
+        }
+      } else if (rawText.includes("<!DOCTYPE") || rawText.includes("<html")) {
+        errorMessage = "Layanan AgentRouter sedang bermasalah atau mengembalikan halaman error (HTML).";
+      }
+
+      return res.status(upstream.status).json({ error: errorMessage });
+    }
+
+    // 2. Parse JSON hanya jika HTTP status OK (200)
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (parseErr) {
+      console.error("Gagal melakukan parse JSON dari respons AgentRouter:", rawText);
+      return res.status(502).json({ error: "Respons dari layanan AI tidak valid." });
     }
 
     const reply = (data.content || [])
@@ -94,6 +127,11 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({ reply: reply || "Maaf, saya tidak dapat memberikan jawaban saat ini." });
   } catch (err) {
     console.error("Riksan AI upstream error:", err);
+
+    if (err.name === "AbortError") {
+      return res.status(504).json({ error: "Waktu permintaan ke layanan AI habis (Timeout)." });
+    }
+
     return res.status(502).json({ error: "Tidak dapat menghubungi layanan AI. Coba lagi sebentar lagi." });
   }
 };
